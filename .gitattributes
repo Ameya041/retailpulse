@@ -1,0 +1,20 @@
+# Normalise line endings so the repo behaves the same on Windows and Linux.
+* text=auto eol=lf
+
+# These run *inside* Linux containers. A CRLF checkout on Windows would make
+# the shebang line read `#!/bin/bash\r`, and the container fails with a
+# confusing "no such file or directory". Force LF regardless of platform.
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.Dockerfile text eol=lf
+entrypoint* text eol=lf
+
+# PowerShell scripts are Windows-side tooling.
+*.ps1 text eol=crlf
+
+# Binary assets must never be line-ending converted.
+*.png binary
+*.jpg binary
+*.ico binary
+*.joblib binary
+*.pdf binary
