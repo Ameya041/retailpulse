@@ -1,0 +1,42 @@
+# Repo-wide tooling configuration. Each service keeps its own runtime
+# dependencies; linting and formatting rules are shared so every service reads
+# the same way.
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [".venv", "alembic/versions", "node_modules", "frontend"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # import sorting
+    "B",    # bugbear -- catches mutable defaults, unused loop vars
+    "UP",   # pyupgrade
+    "C4",   # comprehension simplifications
+    "SIM",  # obvious simplifications
+    "ARG",  # unused arguments
+    "S",    # bandit security checks
+]
+ignore = [
+    "E501",   # line length is handled by the formatter
+    "B008",   # FastAPI's Depends() in defaults is the documented pattern
+    "S104",   # binding 0.0.0.0 is correct inside a container
+    # `class X(str, Enum)` rather than `StrEnum`: these enums are stored in
+    # VARCHAR columns and compared against raw strings loaded from the database,
+    # where the explicit `str` mixin makes that contract obvious at the
+    # definition site.
+    "UP042",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert on hardcoded credentials and use assert freely -- that is the point.
+"**/tests/**" = ["S101", "S105", "S106", "ARG001", "ARG002"]
+"scripts/*" = ["S310"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "retailpulse_common"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
