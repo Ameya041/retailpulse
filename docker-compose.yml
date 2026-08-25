@@ -1,0 +1,96 @@
+# RetailPulse local stack.
+#
+# Infrastructure first; application services are added to this file as each
+# phase lands. Start just the backing services with:
+#
+#   docker compose up -d postgres redis kafka
+#
+name: retailpulse
+
+services:
+  # ---------------------------------------------------------------------
+  # Postgres -- transactional store. One logical database per service.
+  # ---------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: retailpulse-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-retailpulse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-retailpulse_dev_password}
+      POSTGRES_DB: retailpulse
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init-databases.sh:/docker-entrypoint-initdb.d/01-init-databases.sh:ro
+    healthcheck:
+      # Compose waits on this before starting services that depend on the DB,
+      # which removes the "connection refused on first boot" class of failure.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-retailpulse} -d retailpulse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [retailpulse]
+
+  # ---------------------------------------------------------------------
+  # Redis -- cache and rate-limiter counters. Never the source of truth.
+  # ---------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: retailpulse-redis
+    # maxmemory + LRU: a cache must degrade by evicting, not by OOM-killing
+    # itself. Nothing in Redis is data we cannot rebuild from Postgres.
+    command: redis-server --save "" --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [retailpulse]
+
+  # ---------------------------------------------------------------------
+  # Kafka in KRaft mode -- no ZooKeeper. One less system to run and reason
+  # about; ZooKeeper is deprecated for Kafka as of 3.5.
+  # ---------------------------------------------------------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: retailpulse-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # Single broker locally, so replication cannot exceed 1. Production would
+      # run 3 brokers with replication factor 3 and min.insync.replicas 2.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      CLUSTER_ID: retailpulse-local-cluster
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    networks: [retailpulse]
+
+volumes:
+  postgres_data:
+  kafka_data:
+
+networks:
+  retailpulse:
+    driver: bridge
