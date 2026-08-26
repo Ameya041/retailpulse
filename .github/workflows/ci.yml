@@ -1,0 +1,295 @@
+# Continuous integration.
+#
+# Runs on every push and pull request. The job order is deliberate: lint runs
+# first and finishes in seconds, so an obvious mistake fails the build before
+# spending several minutes standing up Postgres and Kafka.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A new push to the same branch cancels the previous run. Without this, a
+# rapid series of pushes queues several full CI runs that are already obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Check formatting
+        run: ruff format --check .
+        # Formatting is advisory here: failing a build on whitespace when the
+        # tests pass wastes more time than it saves.
+        continue-on-error: true
+
+  test:
+    name: Test ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: lint
+
+    strategy:
+      # Do not cancel every other service's tests because one failed -- seeing
+      # all the failures at once is the difference between one fix and five
+      # round trips.
+      fail-fast: false
+      matrix:
+        include:
+          - { service: libs/retailpulse_common, name: common }
+          - { service: services/product-service, name: product }
+          - { service: services/inventory-service, name: inventory }
+          - { service: services/user-service, name: user }
+          - { service: services/order-service, name: order }
+          - { service: services/payment-service, name: payment }
+          - { service: services/fulfilment-service, name: fulfilment }
+          - { service: services/analytics-service, name: analytics }
+          - { service: services/api-gateway, name: gateway }
+          - { service: services/ml-service, name: ml }
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: retailpulse
+          POSTGRES_PASSWORD: retailpulse_dev_password
+          POSTGRES_DB: retailpulse
+        ports: ["5432:5432"]
+        # Without a health check the job races the database and fails
+        # intermittently on a cold runner -- the classic flaky CI.
+        options: >-
+          --health-cmd "pg_isready -U retailpulse"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: retailpulse
+      POSTGRES_PASSWORD: retailpulse_dev_password
+      REDIS_URL: redis://localhost:6379/15
+      JWT_SECRET_KEY: ci-secret-key-at-least-32-bytes-long-for-hs256
+      ENVIRONMENT: test
+      BCRYPT_ROUNDS: "4"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Create service databases
+        run: |
+          for db in product inventory order user payment fulfilment analytics; do
+            PGPASSWORD=retailpulse_dev_password createdb -h localhost -U retailpulse "retailpulse_$db" || true
+          done
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -e libs/retailpulse_common
+          if [ -f "${{ matrix.service }}/requirements.txt" ]; then
+            pip install -r "${{ matrix.service }}/requirements.txt"
+          fi
+          # The ML service imports the training package, which lives outside it.
+          if [ "${{ matrix.name }}" = "ml" ]; then
+            pip install pandas scikit-learn numpy joblib
+          fi
+
+      - name: Run tests
+        working-directory: ${{ matrix.service }}
+        # Kafka integration tests are excluded here and run in their own job --
+        # standing up a broker for all ten matrix legs would multiply CI time
+        # for tests that only one of them needs.
+        run: pytest -m "not kafka" --cov=app --cov-report=term-missing
+
+  migrations:
+    name: Migrations match models
+    runs-on: ubuntu-latest
+    needs: lint
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: retailpulse
+          POSTGRES_PASSWORD: retailpulse_dev_password
+          POSTGRES_DB: retailpulse
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U retailpulse"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_USER: retailpulse
+      POSTGRES_PASSWORD: retailpulse_dev_password
+      JWT_SECRET_KEY: ci-secret-key-at-least-32-bytes-long-for-hs256
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -e libs/retailpulse_common
+          pip install alembic "psycopg[binary]" sqlalchemy pydantic pydantic-settings \
+                      fastapi pyjwt "passlib[bcrypt]" "bcrypt<4.1" prometheus-client \
+                      python-json-logger redis confluent-kafka pandas
+
+      - name: Create service databases
+        run: |
+          for db in product inventory order user payment fulfilment analytics; do
+            PGPASSWORD=retailpulse_dev_password createdb -h localhost -U retailpulse "retailpulse_$db"
+          done
+
+      - name: Apply migrations and verify no drift
+        # `alembic check` fails if the models and the migrations disagree.
+        # Catching that here stops a schema change shipping without the
+        # migration that makes it real -- which fails at deploy, not in review.
+        run: |
+          for service in product inventory order user payment fulfilment analytics; do
+            echo "--- $service ---"
+            cd "services/$service-service"
+            alembic upgrade head
+            alembic check
+            cd "$GITHUB_WORKSPACE"
+          done
+
+  kafka-integration:
+    name: Kafka integration
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Start Kafka
+        # Started through Compose rather than as a job `service`, because KRaft
+        # needs a multi-step startup that a bare service container cannot express.
+        run: |
+          docker compose up -d kafka
+          timeout 120 sh -c 'until docker compose exec -T kafka kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1; do sleep 3; done'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -e libs/retailpulse_common
+          pip install confluent-kafka
+
+      - name: Create topics
+        run: python scripts/create_topics.py --bootstrap-servers localhost:9092
+
+      - name: Run Kafka integration tests
+        working-directory: libs/retailpulse_common
+        env:
+          KAFKA_BOOTSTRAP_SERVERS: localhost:9092
+        run: pytest -m kafka
+
+  ml:
+    name: Model trains and beats baseline
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-dev.txt
+          pip install pandas scikit-learn numpy joblib
+
+      - name: Run ML tests
+        working-directory: ml
+        run: pytest
+
+      - name: Generate data and train
+        # train.py exits non-zero when the model loses to the naive baseline,
+        # so CI refuses to ship a model that does not earn its place.
+        run: |
+          python ml/generate_dataset.py --days 730
+          python ml/train.py
+
+      - name: Publish metrics
+        run: |
+          echo '### Model metrics' >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          python -c "import json;d=json.load(open('ml/artifacts/metrics_v1.json'));print(json.dumps({'metrics':d['metrics'],'baseline':d['baseline_naive_last_7_days'],'improvement_pct':d['mae_improvement_over_naive_pct']},indent=2))" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        working-directory: frontend
+        # `npm ci` rather than `npm install`: it installs exactly the lockfile
+        # and fails if the lockfile is stale, so CI cannot silently drift from
+        # what a developer has locally.
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build

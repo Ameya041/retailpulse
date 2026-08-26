@@ -1,0 +1,168 @@
+# Build and publish container images.
+#
+# Split from ci.yml because it has different triggers and different cost:
+# building 10 images on every pull request would be slow and pointless, since
+# nothing consumes the result until something merges.
+
+name: Docker
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/retailpulse
+
+jobs:
+  build:
+    name: Build ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - api-gateway
+          - product-service
+          - inventory-service
+          - order-service
+          - user-service
+          - payment-service
+          - fulfilment-service
+          - analytics-service
+          - ml-service
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Only authenticate on pushes to main or a tag. A pull request from a
+      # fork has no access to secrets, and requiring them would make every
+      # external contribution fail at this step.
+      - name: Log in to the registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # An immutable tag per commit. `latest` is convenient but
+            # ambiguous -- a rollback needs to name an exact build.
+            type=sha,prefix=sha-,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          # The whole repo, because each service image also needs
+          # libs/retailpulse_common.
+          context: .
+          file: services/${{ matrix.service }}/Dockerfile
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache in the registry, so a build reuses the previous run's
+          # dependency layers instead of reinstalling everything each time.
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  build-frontend:
+    name: Build frontend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/frontend
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: frontend/Dockerfile
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+  compose-smoke:
+    name: Stack starts and answers
+    runs-on: ubuntu-latest
+    needs: [build, build-frontend]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start the stack
+        run: docker compose up -d --build
+
+      - name: Wait for services to become healthy
+        # Polls rather than sleeping a fixed amount: a fixed sleep is either
+        # too short (flaky) or too long (slow), and usually manages both.
+        run: |
+          for service in api-gateway product-service inventory-service order-service \
+                         user-service payment-service fulfilment-service analytics-service; do
+            port=$(docker compose port "$service" "$(docker compose config --format json | python -c "import json,sys;print('')" 2>/dev/null || echo '')" 2>/dev/null || true)
+          done
+          for port in 8000 8001 8002 8003 8004 8005 8006 8007 8008; do
+            echo "waiting for :$port"
+            timeout 120 sh -c "until curl -fsS http://localhost:$port/health >/dev/null; do sleep 3; done"
+            echo "  :$port healthy"
+          done
+
+      - name: Check readiness (dependencies reachable)
+        run: |
+          for port in 8001 8002 8003 8004 8005 8006 8007; do
+            curl -fsS "http://localhost:$port/ready" | python -c "import json,sys;d=json.load(sys.stdin);assert d['status']=='ready', d;print('  ready:', d['service'])"
+          done
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs --tail 100
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

@@ -1,0 +1,142 @@
+# Security scanning.
+#
+# Four different things get scanned, because they fail in different ways:
+#
+#   - Python dependencies      -> a known CVE in something we import
+#   - Container images         -> a known CVE in the base OS packages
+#   - Source code              -> an unsafe pattern we wrote ourselves
+#   - The whole git history    -> a credential someone committed
+#
+# The scheduled run matters as much as the push run: a dependency that was
+# clean when merged becomes vulnerable the day a CVE is published, and nothing
+# in the repository changes to trigger a rebuild.
+
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, Monday 06:00 UTC.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  dependencies:
+    name: Python dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit every service's requirements
+        # `|| true` per file, then a final summary: auditing should report
+        # everything it finds rather than stopping at the first service.
+        run: |
+          status=0
+          for req in services/*/requirements.txt requirements-dev.txt; do
+            echo "--- $req ---"
+            pip-audit -r "$req" --desc || status=1
+          done
+          exit $status
+        # Advisory rather than blocking. A CVE published in a transitive
+        # dependency should not stop an unrelated bug fix from merging; it
+        # should be visible and fixed deliberately.
+        continue-on-error: true
+
+  code:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Security lint
+        # Ruff's `S` rules are Bandit's checks. They already run in CI as part
+        # of the normal lint; this makes the security findings visible on their
+        # own rather than buried among style rules.
+        run: ruff check --select S --output-format github .
+
+  images:
+    name: Container images
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api-gateway, product-service, order-service, ml-service]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -f "services/${{ matrix.service }}/Dockerfile" -t "scan-target:${{ matrix.service }}" .
+
+      - name: Scan with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: "scan-target:${{ matrix.service }}"
+          format: sarif
+          output: "trivy-${{ matrix.service }}.sarif"
+          severity: "CRITICAL,HIGH"
+          # Unfixed vulnerabilities are excluded: there is no action to take on
+          # a CVE with no patch available, and including them buries the ones
+          # that can actually be fixed.
+          ignore-unfixed: true
+
+      - name: Upload results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-${{ matrix.service }}.sarif"
+          category: "trivy-${{ matrix.service }}"
+
+  filesystem:
+    name: Repository scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan the repository with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          severity: "CRITICAL,HIGH"
+          # Fail the build on a finding here. Unlike a CVE in a base image,
+          # anything Trivy finds in our own tree is something we put there.
+          exit-code: "1"
+          ignore-unfixed: true
+
+  secrets:
+    name: Committed secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The full history, not just the tip. A credential removed in a later
+          # commit is still sitting in an earlier one, and is still valid.
+          fetch-depth: 0
+
+      - name: Scan history with Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
