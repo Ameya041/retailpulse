@@ -12,7 +12,7 @@ cannot be measured without a running stack -- latency, throughput, image sizes
 from __future__ import annotations
 
 import argparse
-import ast
+import contextlib
 import json
 import re
 import subprocess
@@ -135,10 +135,9 @@ def count_lines() -> dict[str, int]:
             else None
         )
         if key:
-            try:
+            # A binary or unreadable file should not stop the count.
+            with contextlib.suppress(UnicodeDecodeError, OSError):
                 counts[key] += len(path.read_text(encoding="utf-8").splitlines())
-            except (UnicodeDecodeError, OSError):
-                pass
     return counts
 
 
