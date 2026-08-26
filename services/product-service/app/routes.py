@@ -16,7 +16,15 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
-from app.deps import get_db_session, require_roles
+from app.caching import (
+    invalidate_categories,
+    invalidate_product,
+    read_categories,
+    read_product,
+    read_product_by_sku,
+)
+from app.config import get_settings
+from app.deps import get_cache, get_db_session, require_roles
 from app.models import ProductStatus
 from app.schemas import (
     CategoryCreate,
@@ -28,12 +36,16 @@ from app.schemas import (
 )
 from app.service import ProductService
 from retailpulse_common.auth import Role, TokenPayload
+from retailpulse_common.cache import CacheBackend
 from retailpulse_common.pagination import Page, PageParams, page_params
 
 router = APIRouter(prefix="/products", tags=["products"])
 category_router = APIRouter(prefix="/categories", tags=["categories"])
 
+settings = get_settings()
+
 SessionDep = Annotated[Session, Depends(get_db_session)]
+CacheDep = Annotated[CacheBackend, Depends(get_cache)]
 PageDep = Annotated[PageParams, Depends(page_params)]
 AdminDep = Annotated[TokenPayload, Depends(require_roles(Role.ADMIN))]
 
@@ -50,10 +62,16 @@ COMMON_ERRORS = {
     summary="Create a product",
     responses={**COMMON_ERRORS, 409: {"description": "SKU already exists."}},
 )
-def create_product(payload: ProductCreate, session: SessionDep, _: AdminDep) -> ProductRead:
+def create_product(
+    payload: ProductCreate, session: SessionDep, cache: CacheDep, _: AdminDep
+) -> ProductRead:
     """Add a catalog entry. Requires ADMIN. SKU must be globally unique."""
     product = ProductService(session).create(payload)
-    return ProductRead.from_model(product)
+    result = ProductRead.from_model(product)
+    # A new product changes the category listing and the category set.
+    invalidate_product(cache, product.product_id, product.sku, result.category)
+    invalidate_categories(cache)
+    return result
 
 
 @router.get(
@@ -117,9 +135,18 @@ def products_by_category(
     summary="Look up a product by SKU",
     responses={404: {"description": "No product with that SKU."}},
 )
-def get_product_by_sku(sku: str, session: SessionDep) -> ProductRead:
-    """Warehouse-facing lookup: SKU is what is printed on the label."""
-    return ProductRead.from_model(ProductService(session).get_by_sku(sku))
+def get_product_by_sku(sku: str, session: SessionDep, cache: CacheDep) -> ProductRead:
+    """Warehouse-facing lookup: SKU is what is printed on the label. Cached."""
+    return ProductRead.model_validate(
+        read_product_by_sku(
+            cache,
+            sku,
+            lambda: ProductRead.from_model(ProductService(session).get_by_sku(sku)).model_dump(
+                mode="json"
+            ),
+            settings.cache_ttl_seconds,
+        )
+    )
 
 
 @router.post(
@@ -143,9 +170,22 @@ def bulk_lookup(payload: ProductBulkLookup, session: SessionDep) -> list[Product
     summary="Get a product by ID",
     responses={404: {"description": "No product with that ID."}},
 )
-def get_product(product_id: uuid.UUID, session: SessionDep) -> ProductRead:
-    """Product detail. Public."""
-    return ProductRead.from_model(ProductService(session).get(product_id))
+def get_product(product_id: uuid.UUID, session: SessionDep, cache: CacheDep) -> ProductRead:
+    """Product detail. Public, and served from Redis on a cache hit.
+
+    The hottest read in the catalog, so it is the one that most benefits from
+    not touching Postgres.
+    """
+    return ProductRead.model_validate(
+        read_product(
+            cache,
+            product_id,
+            lambda: ProductRead.from_model(ProductService(session).get(product_id)).model_dump(
+                mode="json"
+            ),
+            settings.cache_ttl_seconds,
+        )
+    )
 
 
 @router.put(
@@ -155,10 +195,28 @@ def get_product(product_id: uuid.UUID, session: SessionDep) -> ProductRead:
     responses={**COMMON_ERRORS, 404: {"description": "No product with that ID."}},
 )
 def update_product(
-    product_id: uuid.UUID, payload: ProductUpdate, session: SessionDep, _: AdminDep
+    product_id: uuid.UUID,
+    payload: ProductUpdate,
+    session: SessionDep,
+    cache: CacheDep,
+    _: AdminDep,
 ) -> ProductRead:
-    """Partial update. Requires ADMIN. SKU is immutable and cannot be sent."""
-    return ProductRead.from_model(ProductService(session).update(product_id, payload))
+    """Partial update. Requires ADMIN. SKU is immutable and cannot be sent.
+
+    The cache entry is deleted rather than overwritten -- see cache.py for why
+    overwriting races under concurrent updates.
+    """
+    service = ProductService(session)
+    previous_category = service.get(product_id).category.name
+    product = service.update(product_id, payload)
+    result = ProductRead.from_model(product)
+
+    invalidate_product(cache, product.product_id, product.sku, result.category)
+    if previous_category != result.category:
+        # It left one category and joined another; both listings are stale.
+        invalidate_product(cache, product.product_id, product.sku, previous_category)
+        invalidate_categories(cache)
+    return result
 
 
 @router.delete(
@@ -172,16 +230,33 @@ def update_product(
     },
 )
 def discontinue_product(
-    product_id: uuid.UUID, session: SessionDep, _: AdminDep
+    product_id: uuid.UUID, session: SessionDep, cache: CacheDep, _: AdminDep
 ) -> ProductRead:
     """Soft delete: sets status to DISCONTINUED so order history stays intact."""
-    return ProductRead.from_model(ProductService(session).discontinue(product_id))
+    product = ProductService(session).discontinue(product_id)
+    result = ProductRead.from_model(product)
+    # Critical to invalidate: a stale cache would keep selling a withdrawn item.
+    invalidate_product(cache, product.product_id, product.sku, result.category)
+    return result
 
 
 @category_router.get("", response_model=list[CategoryRead], summary="List categories")
-def list_categories(session: SessionDep) -> list[CategoryRead]:
-    """Categories currently in use by the catalog."""
-    return [CategoryRead.model_validate(c) for c in ProductService(session).list_categories()]
+def list_categories(session: SessionDep, cache: CacheDep) -> list[CategoryRead]:
+    """Categories currently in use by the catalog. Cached.
+
+    Rendered in the storefront navigation on every page load and changes only
+    when a category is first used, which makes it close to an ideal cache
+    candidate.
+    """
+    rows = read_categories(
+        cache,
+        lambda: [
+            CategoryRead.model_validate(c).model_dump(mode="json")
+            for c in ProductService(session).list_categories()
+        ],
+        settings.cache_ttl_seconds,
+    )
+    return [CategoryRead.model_validate(row) for row in rows]
 
 
 @category_router.post(
@@ -192,11 +267,12 @@ def list_categories(session: SessionDep) -> list[CategoryRead]:
     responses=COMMON_ERRORS,
 )
 def create_category(
-    payload: CategoryCreate, session: SessionDep, _: AdminDep
+    payload: CategoryCreate, session: SessionDep, cache: CacheDep, _: AdminDep
 ) -> CategoryRead:
     """Requires ADMIN. Idempotent: an existing slug is returned as-is."""
     category = ProductService(session).get_or_create_category(payload.name)
     if payload.description and not category.description:
         category.description = payload.description
         session.flush()
+    invalidate_categories(cache)
     return CategoryRead.model_validate(category)

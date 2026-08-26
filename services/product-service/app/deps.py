@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.service import ProductService
 from retailpulse_common.auth import build_auth_dependencies
+from retailpulse_common.cache import CacheBackend, NullCache, RedisCache
 from retailpulse_common.db import Database
 
 settings = get_settings()
@@ -35,6 +36,29 @@ def get_db_session() -> Iterator[Session]:
 
 def get_product_service(session: Session) -> ProductService:
     return ProductService(session)
+
+
+@lru_cache(maxsize=1)
+def _cache() -> CacheBackend:
+    if not settings.redis_url:
+        return NullCache()
+    return RedisCache(settings.redis_url, service_name=settings.service_name)
+
+
+def get_cache() -> CacheBackend:
+    """Overridden in tests with an in-memory cache."""
+    return _cache()
+
+
+def cache_ready() -> bool:
+    """Reported by /ready but never fatal.
+
+    Redis being down degrades performance, not correctness -- every cached
+    value can be rebuilt from Postgres. The readiness endpoint surfaces it so
+    it is visible in monitoring without pulling the pod out of the load
+    balancer for a non-essential dependency.
+    """
+    return _cache().ping()
 
 
 current_user, optional_user, require_roles = build_auth_dependencies(

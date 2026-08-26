@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.config import get_settings
-from app.deps import database_ready
+from app.deps import cache_ready, database_ready
 from app.routes import category_router, router
 from retailpulse_common.app import create_service_app
 
@@ -16,9 +16,14 @@ app = create_service_app(
         "Owns the product catalog: products, categories, search and pagination.\n\n"
         "**Data ownership.** This service is the only writer of the `products` and "
         "`categories` tables. Other services reference a `product_id` and read "
-        "through this API rather than querying the catalog database directly."
+        "through this API rather than querying the catalog database directly.\n\n"
+        "**Caching.** Single-product lookups and the category list are cached in Redis "
+        "with cache-aside semantics: read through on a miss, and *delete* (never "
+        "overwrite) on a write, because overwriting races under concurrent updates. "
+        "Redis is never the source of truth -- if it is unavailable every read falls "
+        "back to Postgres, so a cache outage costs latency rather than availability."
     ),
-    checks={"database": database_ready},
+    checks={"database": database_ready, "cache": cache_ready},
 )
 
 app.include_router(router)

@@ -19,9 +19,10 @@ os.environ["ENVIRONMENT"] = "test"
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import models  # noqa: E402,F401  (registers tables on Base.metadata)
-from app.deps import get_db_session  # noqa: E402
+from app.deps import get_cache, get_db_session  # noqa: E402
 from app.main import app  # noqa: E402
 from retailpulse_common.auth import Role, create_access_token  # noqa: E402
+from retailpulse_common.cache import InMemoryCache  # noqa: E402
 from retailpulse_common.db import Base, Database  # noqa: E402
 
 TEST_SECRET = "test-secret-key-not-used-in-production"
@@ -35,12 +36,24 @@ def database() -> Database:
 
 
 @pytest.fixture()
-def client(database: Database) -> TestClient:
+def cache() -> InMemoryCache:
+    """An in-memory cache per test.
+
+    Overriding this is essential: without it the suite would talk to whatever
+    Redis happens to be running, and tests would pollute each other through
+    shared cache state.
+    """
+    return InMemoryCache(service_name="product-service")
+
+
+@pytest.fixture()
+def client(database: Database, cache: InMemoryCache) -> TestClient:
     def _override():
         with database.session() as session:
             yield session
 
     app.dependency_overrides[get_db_session] = _override
+    app.dependency_overrides[get_cache] = lambda: cache
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
