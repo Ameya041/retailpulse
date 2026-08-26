@@ -31,14 +31,31 @@ def build_engine(database_url: str, **kwargs: Any) -> Engine:
     if database_url.startswith("sqlite"):
         # SQLite is used only by fast unit tests. StaticPool + check_same_thread
         # keep an in-memory database alive across the TestClient's threads.
+        from sqlalchemy import event
         from sqlalchemy.pool import StaticPool
 
-        return create_engine(
+        engine = create_engine(
             database_url,
             connect_args={"check_same_thread": False},
             poolclass=StaticPool,
             future=True,
         )
+
+        # pysqlite's legacy transaction handling: it opens transactions
+        # implicitly and inconsistently, which makes SAVEPOINT and ROLLBACK
+        # behave differently from every real database. Left alone, a test can
+        # "pass" against semantics Postgres does not share -- the worst kind of
+        # green test. This is SQLAlchemy's documented fix: turn the driver's
+        # implicit BEGIN off and emit it explicitly.
+        @event.listens_for(engine, "connect")
+        def _disable_implicit_begin(dbapi_connection, _record):
+            dbapi_connection.isolation_level = None
+
+        @event.listens_for(engine, "begin")
+        def _emit_explicit_begin(conn):
+            conn.exec_driver_sql("BEGIN")
+
+        return engine
 
     return create_engine(
         database_url,
