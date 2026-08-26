@@ -24,6 +24,11 @@ from app.routing import BreakerState, resolve
         ("/api/auth/login", "user-service", "/auth/login"),
         ("/api/payments/abc/refund", "payment-service", "/payments/abc/refund"),
         ("/api/fulfilment/abc/ship", "fulfilment-service", "/fulfilment/abc/ship"),
+        ("/api/analytics/dashboard", "analytics-service", "/analytics/dashboard"),
+        ("/api/forecast/products", "ml-service", "/forecast/products"),
+        # Model metadata is public while forecasting is staff-only, so it gets
+        # its own prefix rather than nesting under /forecast.
+        ("/api/model/info", "ml-service", "/model/info"),
     ],
 )
 def test_paths_route_to_the_owning_service(path, expected_backend, expected_upstream):

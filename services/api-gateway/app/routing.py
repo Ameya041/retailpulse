@@ -69,6 +69,10 @@ BACKENDS: tuple[Backend, ...] = (
     Backend("fulfilment-service", "/api/fulfilment", "/fulfilment", "fulfilment_service_url", public_read=False),
     Backend("analytics-service", "/api/analytics", "/analytics", "analytics_service_url", public_read=False),
     Backend("ml-service", "/api/forecast", "/forecast", "ml_service_url", public_read=False),
+    # Model metadata (version, accuracy vs baseline) is deliberately its own
+    # prefix rather than nested under /forecast, because it is public while
+    # forecasting is staff-only.
+    Backend("ml-service", "/api/model", "/model", "ml_service_url"),
 )
 
 
