@@ -1,0 +1,121 @@
+{
+  "model_name": "gradient_boosting",
+  "model_version": "v1",
+  "horizon_days": 7,
+  "trained_at": "2026-08-26T09:29:59.592122+00:00",
+  "python_version": "3.11.9",
+  "rows_total": 107400,
+  "rows_train": 97350,
+  "rows_test": 9000,
+  "train_period": [
+    "2024-01-08",
+    "2025-10-17"
+  ],
+  "test_period": [
+    "2025-10-25",
+    "2025-12-23"
+  ],
+  "features": [
+    "lag_1_units",
+    "lag_7_units",
+    "roll_7_mean",
+    "roll_7_sum",
+    "roll_28_mean",
+    "roll_7_std",
+    "trailing_7_price_mean",
+    "day_of_week",
+    "month",
+    "is_weekend",
+    "price",
+    "promotion",
+    "holiday",
+    "horizon_weekend_days",
+    "horizon_holiday_days",
+    "horizon_promo_days",
+    "horizon_mean_price",
+    "store_id",
+    "category"
+  ],
+  "metrics": {
+    "mae": 14.827478283762861,
+    "rmse": 21.296044358479385,
+    "r2": 0.9804581807153435,
+    "mape": 10.68122805940904
+  },
+  "baseline_naive_last_7_days": {
+    "mae": 19.16922222222222,
+    "rmse": 28.657950225218674,
+    "r2": 0.9646118910755676,
+    "mape": 13.747589878370855
+  },
+  "baseline_same_weekday": {
+    "mae": 41.272333333333336,
+    "rmse": 61.54715716875602,
+    "r2": 0.836776343319177,
+    "mape": 28.024440200587186
+  },
+  "mae_improvement_over_naive_pct": 22.65,
+  "beats_baseline": true,
+  "feature_importances": [
+    {
+      "feature": "numeric__roll_28_mean",
+      "importance": 0.7001
+    },
+    {
+      "feature": "numeric__roll_7_sum",
+      "importance": 0.1425
+    },
+    {
+      "feature": "numeric__roll_7_mean",
+      "importance": 0.1184
+    },
+    {
+      "feature": "categorical__category_Groceries",
+      "importance": 0.0133
+    },
+    {
+      "feature": "numeric__trailing_7_price_mean",
+      "importance": 0.0107
+    },
+    {
+      "feature": "numeric__price",
+      "importance": 0.0047
+    },
+    {
+      "feature": "numeric__month",
+      "importance": 0.0041
+    },
+    {
+      "feature": "numeric__horizon_mean_price",
+      "importance": 0.0037
+    },
+    {
+      "feature": "numeric__horizon_holiday_days",
+      "importance": 0.0006
+    },
+    {
+      "feature": "numeric__horizon_promo_days",
+      "importance": 0.0006
+    },
+    {
+      "feature": "numeric__lag_1_units",
+      "importance": 0.0003
+    },
+    {
+      "feature": "categorical__store_id_BLR01",
+      "importance": 0.0003
+    },
+    {
+      "feature": "categorical__category_Fashion",
+      "importance": 0.0002
+    },
+    {
+      "feature": "numeric__roll_7_std",
+      "importance": 0.0002
+    },
+    {
+      "feature": "categorical__store_id_HYD01",
+      "importance": 0.0001
+    }
+  ]
+}
