@@ -1,0 +1,46 @@
+# Keep the build context small and free of anything that could leak.
+#
+# Everything here would otherwise be shipped into the image: .env holds real
+# credentials, .git holds the entire history, and .venv is hundreds of
+# megabytes of platform-specific binaries that would break inside Linux anyway.
+
+.git
+.gitignore
+.github
+
+# Secrets -- must never enter an image layer. A file deleted in a later layer
+# is still recoverable from the earlier one.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Virtualenvs and caches
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+htmlcov
+.coverage
+coverage.xml
+
+# Node
+node_modules
+frontend/node_modules
+frontend/dist
+
+# Generated data and model artifacts are mounted or built, not baked in
+data/generated
+ml/artifacts/*.joblib
+
+# Local tooling
+.vscode
+.idea
+*.md
+!README.md
+docs
+load-tests

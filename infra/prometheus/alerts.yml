@@ -1,0 +1,100 @@
+# Alert rules.
+#
+# Every rule here is written against a symptom a user would notice, not
+# against a cause. "CPU is high" is not an alert -- it is sometimes exactly
+# what you want. "Checkout is failing" is an alert.
+#
+# `for:` durations exist so a brief spike during a deploy does not page
+# anyone. An alert that fires on every rolling update gets muted, and a muted
+# alert is worse than no alert.
+
+groups:
+  - name: retailpulse-availability
+    rules:
+      - alert: ServiceDown
+        expr: up{job="retailpulse-services"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} is not responding to scrapes"
+          description: "Prometheus has been unable to reach {{ $labels.service }} for over a minute."
+
+      - alert: HighErrorRate
+        # Ratio, not a raw count. A count threshold fires on a busy Monday and
+        # stays silent during a quiet outage.
+        expr: |
+          sum by (service) (rate(http_errors_total{status=~"5.."}[5m]))
+            /
+          sum by (service) (rate(http_requests_total[5m]))
+            > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} is returning over 5% server errors"
+
+      - alert: HighLatency
+        # P95, not the mean. A mean hides the tail, and the tail is what users
+        # actually experience as "the site is slow".
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (service, le) (rate(http_request_duration_seconds_bucket[5m]))
+          ) > 1.0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} P95 latency is above 1 second"
+
+  - name: retailpulse-business
+    rules:
+      - alert: InventoryReservationFailures
+        expr: |
+          sum(rate(inventory_reservation_failures_total[10m]))
+            /
+          clamp_min(sum(rate(inventory_reservations_total[10m])), 0.001)
+            > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 20% of inventory reservations are failing"
+          description: "Usually means popular stock has run out, or restocking has stopped."
+
+      - alert: EventsDeadLettering
+        # Any dead letter is worth knowing about: it means an event could not
+        # be processed after every retry, and a business action is now stuck.
+        expr: sum by (service) (increase(kafka_events_failed_total[15m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} is dead-lettering events"
+          description: "Check the DLQ topics; an order flow is likely stalled."
+
+      - alert: OrderCancellationSpike
+        expr: |
+          sum(rate(orders_failed_total[15m]))
+            /
+          clamp_min(sum(rate(orders_created_total[15m])), 0.001)
+            > 0.3
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Over 30% of orders are ending cancelled"
+          description: "Check payment approval rates and inventory availability."
+
+      - alert: NoOrdersBeingCreated
+        # The alert that catches a silent failure: everything looks healthy,
+        # nothing is erroring, and no orders are being placed because the
+        # checkout button is broken in the frontend.
+        expr: sum(rate(orders_created_total[30m])) == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No orders have been created in 30 minutes"
+          description: "Every service may look healthy while checkout is broken."

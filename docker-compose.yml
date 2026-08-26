@@ -1,19 +1,68 @@
-# RetailPulse local stack.
+# RetailPulse -- the whole platform.
 #
-# Infrastructure first; application services are added to this file as each
-# phase lands. Start just the backing services with:
+#   docker compose up -d
 #
-#   docker compose up -d postgres redis kafka
+# Brings up 4 infrastructure containers, 9 services, 5 event workers, the
+# frontend, Prometheus and Grafana.
 #
+# ## Two things worth knowing before reading further
+#
+# **API and worker are separate containers from the same image.** The API
+# scales on request latency; a consumer scales on partition count and lag.
+# Sharing a process would mean scaling the web tier to clear a backlog, and
+# every API replica joining the consumer group whether it was needed or not.
+#
+# **Migrations run in their own one-shot containers.** Running them at
+# application startup means N replicas racing to apply the same DDL. A job
+# that must run exactly once should not live in a process that runs N times.
+
 name: retailpulse
 
+# ---------------------------------------------------------------------------
+# Anchors. These keep the 14 service definitions below readable rather than a
+# wall of repeated environment blocks.
+# ---------------------------------------------------------------------------
+x-common-env: &common-env
+  ENVIRONMENT: ${ENVIRONMENT:-local}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  POSTGRES_USER: ${POSTGRES_USER:-retailpulse}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-retailpulse_dev_password}
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  REDIS_URL: redis://redis:6379/0
+  KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY:-local-dev-secret-key-at-least-32-bytes-long}
+  CORS_ALLOW_ORIGINS: '["http://localhost:5173","http://localhost:3000"]'
+
+x-service-urls: &service-urls
+  PRODUCT_SERVICE_URL: http://product-service:8001
+  INVENTORY_SERVICE_URL: http://inventory-service:8002
+  ORDER_SERVICE_URL: http://order-service:8003
+  USER_SERVICE_URL: http://user-service:8004
+  PAYMENT_SERVICE_URL: http://payment-service:8005
+  FULFILMENT_SERVICE_URL: http://fulfilment-service:8006
+  ANALYTICS_SERVICE_URL: http://analytics-service:8007
+  ML_SERVICE_URL: http://ml-service:8008
+
+x-restart: &restart
+  restart: unless-stopped
+
+x-healthy-infra: &healthy-infra
+  postgres:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  kafka:
+    condition: service_healthy
+
 services:
-  # ---------------------------------------------------------------------
-  # Postgres -- transactional store. One logical database per service.
-  # ---------------------------------------------------------------------
+  # =========================================================================
+  # Infrastructure
+  # =========================================================================
   postgres:
     image: postgres:16-alpine
     container_name: retailpulse-postgres
+    <<: *restart
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-retailpulse}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-retailpulse_dev_password}
@@ -24,8 +73,6 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/postgres/init-databases.sh:/docker-entrypoint-initdb.d/01-init-databases.sh:ro
     healthcheck:
-      # Compose waits on this before starting services that depend on the DB,
-      # which removes the "connection refused on first boot" class of failure.
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-retailpulse} -d retailpulse"]
       interval: 5s
       timeout: 5s
@@ -33,14 +80,12 @@ services:
       start_period: 10s
     networks: [retailpulse]
 
-  # ---------------------------------------------------------------------
-  # Redis -- cache and rate-limiter counters. Never the source of truth.
-  # ---------------------------------------------------------------------
   redis:
     image: redis:7-alpine
     container_name: retailpulse-redis
-    # maxmemory + LRU: a cache must degrade by evicting, not by OOM-killing
-    # itself. Nothing in Redis is data we cannot rebuild from Postgres.
+    <<: *restart
+    # maxmemory + LRU: a cache must degrade by evicting, not by being
+    # OOM-killed. Nothing in Redis cannot be rebuilt from Postgres.
     command: redis-server --save "" --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
@@ -51,13 +96,10 @@ services:
       retries: 10
     networks: [retailpulse]
 
-  # ---------------------------------------------------------------------
-  # Kafka in KRaft mode -- no ZooKeeper. One less system to run and reason
-  # about; ZooKeeper is deprecated for Kafka as of 3.5.
-  # ---------------------------------------------------------------------
   kafka:
     image: confluentinc/cp-kafka:7.6.1
     container_name: retailpulse-kafka
+    <<: *restart
     ports:
       - "9092:9092"
     environment:
@@ -70,15 +112,15 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       # Single broker locally, so replication cannot exceed 1. Production would
-      # run 3 brokers with replication factor 3 and min.insync.replicas 2.
+      # run 3 brokers with replication factor 3 and min.insync.replicas 2,
+      # which is what makes the producers' acks=all meaningful.
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
-      # KRaft requires a base64-encoded UUID (22 chars, no padding), NOT a
-      # human-readable name -- the broker refuses to format storage otherwise.
-      # Generated once and pinned so the data volume stays valid across restarts.
+      # Must be a base64-encoded UUID, not a readable name -- the broker
+      # refuses to format its storage otherwise.
       CLUSTER_ID: fzwakltITiGdbyqOTBt9BQ
     volumes:
       - kafka_data:/var/lib/kafka/data
@@ -90,9 +132,352 @@ services:
       start_period: 20s
     networks: [retailpulse]
 
+  # =========================================================================
+  # One-shot setup. These exit; `docker compose up` waits on them.
+  # =========================================================================
+  kafka-topics:
+    build:
+      context: .
+      dockerfile: services/order-service/Dockerfile
+    container_name: retailpulse-kafka-topics
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    # Topics are created explicitly rather than auto-created. Auto-created
+    # topics take broker defaults (one partition), which silently caps consumer
+    # parallelism forever, and a typo becomes a real topic nothing reads.
+    command: ["python", "/app/scripts/create_topics.py", "--bootstrap-servers", "kafka:29092"]
+    volumes:
+      - ./scripts:/app/scripts:ro
+      - ./libs/retailpulse_common:/app/libs/retailpulse_common:ro
+    restart: on-failure
+    networks: [retailpulse]
+
+  migrate:
+    build:
+      context: .
+      dockerfile: infra/docker/migrate.Dockerfile
+    container_name: retailpulse-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    restart: on-failure
+    networks: [retailpulse]
+
+  # =========================================================================
+  # Application services
+  # =========================================================================
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    container_name: retailpulse-api-gateway
+    <<: *restart
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      <<: [*common-env, *service-urls]
+    ports:
+      - "8000:8000"
+    networks: [retailpulse]
+
+  product-service:
+    build:
+      context: .
+      dockerfile: services/product-service/Dockerfile
+    container_name: retailpulse-product
+    <<: *restart
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    ports:
+      - "8001:8001"
+    networks: [retailpulse]
+
+  inventory-service:
+    build:
+      context: .
+      dockerfile: services/inventory-service/Dockerfile
+    container_name: retailpulse-inventory
+    <<: *restart
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      <<: *healthy-infra
+    environment:
+      <<: [*common-env, *service-urls]
+    ports:
+      - "8002:8002"
+    networks: [retailpulse]
+
+  order-service:
+    build:
+      context: .
+      dockerfile: services/order-service/Dockerfile
+    container_name: retailpulse-order
+    <<: *restart
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      <<: *healthy-infra
+    environment:
+      <<: [*common-env, *service-urls]
+    ports:
+      - "8003:8003"
+    networks: [retailpulse]
+
+  user-service:
+    build:
+      context: .
+      dockerfile: services/user-service/Dockerfile
+    container_name: retailpulse-user
+    <<: *restart
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    ports:
+      - "8004:8004"
+    networks: [retailpulse]
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: services/payment-service/Dockerfile
+    container_name: retailpulse-payment
+    <<: *restart
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      <<: *healthy-infra
+    environment:
+      <<: *common-env
+      # Turn this down to demonstrate the compensation path on demand rather
+      # than waiting for a 5% chance to land.
+      PAYMENT_SUCCESS_RATE: ${PAYMENT_SUCCESS_RATE:-0.95}
+    ports:
+      - "8005:8005"
+    networks: [retailpulse]
+
+  fulfilment-service:
+    build:
+      context: .
+      dockerfile: services/fulfilment-service/Dockerfile
+    container_name: retailpulse-fulfilment
+    <<: *restart
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      <<: *healthy-infra
+    environment:
+      <<: *common-env
+    ports:
+      - "8006:8006"
+    networks: [retailpulse]
+
+  analytics-service:
+    build:
+      context: .
+      dockerfile: services/analytics-service/Dockerfile
+    container_name: retailpulse-analytics
+    <<: *restart
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      <<: *healthy-infra
+    environment:
+      <<: [*common-env, *service-urls]
+    ports:
+      - "8007:8007"
+    networks: [retailpulse]
+
+  ml-service:
+    build:
+      context: .
+      dockerfile: services/ml-service/Dockerfile
+    container_name: retailpulse-ml
+    <<: *restart
+    environment:
+      <<: *common-env
+      MODEL_PATH: /app/ml/artifacts/demand_forecaster_v1.joblib
+      HISTORY_PATH: /app/data/generated/sales.csv
+    # Model and history are mounted rather than baked in: they are large,
+    # regenerated independently of the code, and baking them would mean
+    # rebuilding the image to retrain.
+    volumes:
+      - ./ml:/app/ml:ro
+      - ./data:/app/data:ro
+    ports:
+      - "8008:8008"
+    networks: [retailpulse]
+
+  # =========================================================================
+  # Event workers -- same images, different command.
+  # =========================================================================
+  inventory-worker:
+    build:
+      context: .
+      dockerfile: services/inventory-service/Dockerfile
+    container_name: retailpulse-inventory-worker
+    <<: *restart
+    depends_on:
+      kafka-topics:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: [*common-env, *service-urls]
+    command: ["python", "-m", "app.worker"]
+    # No healthcheck: a consumer exposes no HTTP port. Its health is visible
+    # as consumer lag in Prometheus, which is the right signal anyway.
+    healthcheck:
+      disable: true
+    networks: [retailpulse]
+
+  order-worker:
+    build:
+      context: .
+      dockerfile: services/order-service/Dockerfile
+    container_name: retailpulse-order-worker
+    <<: *restart
+    depends_on:
+      kafka-topics:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: [*common-env, *service-urls]
+    command: ["python", "-m", "app.worker"]
+    healthcheck:
+      disable: true
+    networks: [retailpulse]
+
+  payment-worker:
+    build:
+      context: .
+      dockerfile: services/payment-service/Dockerfile
+    container_name: retailpulse-payment-worker
+    <<: *restart
+    depends_on:
+      kafka-topics:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *common-env
+      PAYMENT_SUCCESS_RATE: ${PAYMENT_SUCCESS_RATE:-0.95}
+    command: ["python", "-m", "app.worker"]
+    healthcheck:
+      disable: true
+    networks: [retailpulse]
+
+  fulfilment-worker:
+    build:
+      context: .
+      dockerfile: services/fulfilment-service/Dockerfile
+    container_name: retailpulse-fulfilment-worker
+    <<: *restart
+    depends_on:
+      kafka-topics:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *common-env
+    command: ["python", "-m", "app.worker"]
+    healthcheck:
+      disable: true
+    networks: [retailpulse]
+
+  analytics-worker:
+    build:
+      context: .
+      dockerfile: services/analytics-service/Dockerfile
+    container_name: retailpulse-analytics-worker
+    <<: *restart
+    depends_on:
+      kafka-topics:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: [*common-env, *service-urls]
+    command: ["python", "-m", "app.worker"]
+    healthcheck:
+      disable: true
+    networks: [retailpulse]
+
+  # =========================================================================
+  # Frontend and observability
+  # =========================================================================
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: retailpulse-frontend
+    <<: *restart
+    depends_on:
+      - api-gateway
+    ports:
+      - "3000:80"
+    networks: [retailpulse]
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: retailpulse-prometheus
+    <<: *restart
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks: [retailpulse]
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: retailpulse-grafana
+    <<: *restart
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      # Local convenience only. A deployed Grafana must require a login.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    networks: [retailpulse]
+
 volumes:
   postgres_data:
   kafka_data:
+  prometheus_data:
+  grafana_data:
 
 networks:
   retailpulse:

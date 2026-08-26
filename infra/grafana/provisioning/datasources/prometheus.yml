@@ -1,0 +1,16 @@
+# Provisioned so Grafana comes up already wired to Prometheus.
+#
+# Configuring a datasource by hand after every `docker compose up` is the kind
+# of step that gets forgotten and then blamed on the dashboards being broken.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
