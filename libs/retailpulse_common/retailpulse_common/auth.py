@@ -17,6 +17,7 @@ hiding a button is a UX detail, not a security control.
 from __future__ import annotations
 
 import enum
+import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
@@ -32,7 +33,29 @@ from retailpulse_common.errors import ForbiddenError, UnauthorizedError
 # bcrypt: deliberately slow, salted per-password, and the cost factor can be
 # raised as hardware improves. Never a plain SHA hash -- those are built to be
 # fast, which is exactly wrong for passwords.
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
+#
+# The cost factor is configurable ONLY so the test suite can drop it: at cost 12
+# every fixture that logs in costs ~250ms, which makes CI crawl. Anything other
+# than local/test keeps 12 -- `_resolve_rounds` refuses to lower it unless
+# ENVIRONMENT explicitly says test, so a misconfigured deployment cannot
+# silently weaken password hashing.
+_DEFAULT_BCRYPT_ROUNDS = 12
+_MIN_PRODUCTION_ROUNDS = 12
+
+
+def _resolve_rounds() -> int:
+    if os.getenv("ENVIRONMENT", "local").lower() != "test":
+        return _DEFAULT_BCRYPT_ROUNDS
+    try:
+        requested = int(os.getenv("BCRYPT_ROUNDS", _DEFAULT_BCRYPT_ROUNDS))
+    except ValueError:
+        return _DEFAULT_BCRYPT_ROUNDS
+    return max(4, min(requested, _MIN_PRODUCTION_ROUNDS))
+
+
+pwd_context = CryptContext(
+    schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=_resolve_rounds()
+)
 
 # auto_error=False so a missing header raises our own 401 envelope rather than
 # FastAPI's default shape.
