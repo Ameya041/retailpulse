@@ -76,7 +76,10 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
-      CLUSTER_ID: retailpulse-local-cluster
+      # KRaft requires a base64-encoded UUID (22 chars, no padding), NOT a
+      # human-readable name -- the broker refuses to format storage otherwise.
+      # Generated once and pinned so the data volume stays valid across restarts.
+      CLUSTER_ID: fzwakltITiGdbyqOTBt9BQ
     volumes:
       - kafka_data:/var/lib/kafka/data
     healthcheck:
