@@ -407,7 +407,18 @@ def test_adjustment_applies_and_is_recorded(session, stocked):
     item = service.adjust(product_id, location.location_id, -2, "damaged units")
 
     assert item.available_quantity == 8
-    assert service.movements(product_id)[0].movement_type == MovementType.ADJUSTMENT.value
+    # Selected by type rather than by position: two movements written in the
+    # same clock tick share a created_at, and the tie-break is deterministic
+    # but not insertion-ordered. See StockMovement in models.py.
+    adjustments = [
+        m
+        for m in service.movements(product_id)
+        if m.movement_type == MovementType.ADJUSTMENT.value
+    ]
+    assert len(adjustments) == 1
+    assert adjustments[0].quantity_delta == -2
+    assert adjustments[0].available_after == 8
+    assert adjustments[0].note == "damaged units"
 
 
 # ---------------------------------------------------------------------------

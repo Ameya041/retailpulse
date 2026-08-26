@@ -36,6 +36,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from retailpulse_common.db import Base
 
+# Registers `processed_events` and `outbox_events` on this service's metadata.
+from retailpulse_common.events.idempotency import ProcessedEvent  # noqa: F401,E402
+from retailpulse_common.events.outbox import OutboxEvent  # noqa: F401,E402
+
 
 class ReservationStatus(str, enum.Enum):
     """Lifecycle of a single reservation record."""
@@ -189,6 +193,17 @@ class Reservation(Base):
 
 class StockMovement(Base):
     """Append-only ledger of every quantity change.
+
+    **Ordering caveat.** Rows are ordered by ``created_at`` with
+    ``movement_id`` as a tie-break, which is *deterministic* (pagination can
+    never skip or duplicate a row) but is not guaranteed to be insertion order:
+    two movements written inside the same clock tick share a timestamp, and the
+    tie-break is then a random UUID. Clock granularity is coarse on Windows and
+    fine on Linux, so this shows up mostly in local tests. Guaranteeing true
+    insertion order would mean adding a database sequence column; the current
+    ordering is sufficient because nothing reconciles stock by row order -- the
+    ``available_after``/``reserved_after`` snapshots on each row carry that
+    information independently.
 
     Current quantities in `inventory` are a running total; this table is the
     history that explains how they got there. When stock looks wrong in

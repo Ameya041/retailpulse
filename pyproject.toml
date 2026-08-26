@@ -34,7 +34,12 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # Tests assert on hardcoded credentials and use assert freely -- that is the point.
-"**/tests/**" = ["S101", "S105", "S106", "ARG001", "ARG002"]
+# ARG005/B017: stub callables and broad `pytest.raises` are normal in tests.
+"**/tests/**" = ["S101", "S105", "S106", "ARG001", "ARG002", "ARG005", "B017"]
+# Event handlers all share one signature so the worker can dispatch on a plain
+# lookup table. Some handlers legitimately do not publish anything, but the
+# parameter has to stay for the signature to be uniform.
+"**/handlers.py" = ["ARG001"]
 "scripts/*" = ["S310"]
 
 [tool.ruff.lint.isort]

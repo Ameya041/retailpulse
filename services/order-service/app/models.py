@@ -34,6 +34,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from retailpulse_common.db import Base
 
+# Registers `processed_events` and `outbox_events` on this service's metadata.
+# Imported here rather than in the modules that use them so Alembic sees the
+# tables from a single, obvious place.
+from retailpulse_common.events.idempotency import ProcessedEvent  # noqa: F401,E402
+from retailpulse_common.events.outbox import OutboxEvent  # noqa: F401,E402
+
 ORDER_STATUSES = (
     "CREATED",
     "INVENTORY_RESERVED",

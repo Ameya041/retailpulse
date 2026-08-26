@@ -27,6 +27,10 @@ from retailpulse_common.errors import (
     NotFoundError,
     ValidationError,
 )
+from retailpulse_common.events.envelope import EventEnvelope
+from retailpulse_common.events.outbox import enqueue
+from retailpulse_common.events.producer import order_key
+from retailpulse_common.events.topics import EventType, Topic
 from retailpulse_common.observability import (
     ORDERS_COMPLETED_TOTAL,
     ORDERS_CREATED_TOTAL,
@@ -37,6 +41,32 @@ logger = logging.getLogger("order-service")
 SERVICE = "order-service"
 
 MAX_ORDER_LINES = 50
+
+
+def order_created_payload(order: Order) -> dict:
+    """Build the ORDER_CREATED payload from a persisted order.
+
+    Carries everything downstream services need, so neither the inventory nor
+    the payment service has to call back into the order service to do its job.
+    A saga that fans back out to its originator is slower and couples
+    availability in the wrong direction.
+    """
+    return {
+        "order_id": str(order.order_id),
+        "customer_id": str(order.customer_id),
+        "total_amount": str(order.total_amount),
+        "currency": order.currency,
+        "shipping_address": order.shipping_address,
+        "lines": [
+            {
+                "product_id": str(item.product_id),
+                "sku": item.sku,
+                "quantity": item.quantity,
+                "unit_price": str(item.unit_price),
+            }
+            for item in order.items
+        ],
+    }
 
 
 class CartService:
@@ -301,6 +331,22 @@ class OrderService:
         # The cart is consumed by a successful checkout.
         if cart is not None:
             cart.items.clear()
+
+        # ORDER_CREATED is staged in the outbox on THIS transaction, not
+        # published to Kafka here. Publishing directly would be a second write
+        # to a second system with no transaction spanning them: a crash between
+        # the commit and the publish would leave a real order that no
+        # downstream service ever hears about. See events/outbox.py.
+        enqueue(
+            self.session,
+            Topic.ORDER_CREATED,
+            EventEnvelope(
+                event_type=EventType.ORDER_CREATED,
+                source=SERVICE,
+                payload=order_created_payload(order),
+            ),
+            key=order_key(order.order_id),
+        )
 
         self.session.flush()
         self.session.refresh(order)
