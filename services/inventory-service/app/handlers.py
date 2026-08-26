@@ -31,6 +31,7 @@ from retailpulse_common.errors import InsufficientInventoryError, NotFoundError
 from retailpulse_common.events.consumer import PermanentEventError
 from retailpulse_common.events.envelope import EventEnvelope
 from retailpulse_common.events.idempotency import IdempotencyGuard
+from retailpulse_common.events.outbox import enqueue
 from retailpulse_common.events.producer import EventPublisher, order_key
 from retailpulse_common.events.topics import EventType, Topic
 
@@ -116,7 +117,8 @@ def handle_order_created(
             "reservation rejected",
             extra={"order_id": str(order_id), "reason": exc.code},
         )
-        publisher.publish(
+        enqueue(
+            session,
             Topic.INVENTORY_FAILED,
             event.child(
                 event_type=EventType.INVENTORY_FAILED,
@@ -132,7 +134,8 @@ def handle_order_created(
         )
         return
 
-    publisher.publish(
+    enqueue(
+        session,
         Topic.INVENTORY_RESERVED,
         event.child(
             event_type=EventType.INVENTORY_RESERVED,
@@ -155,7 +158,7 @@ def handle_order_created(
         key=order_key(order_id),
     )
 
-    _emit_low_stock_warnings(service, publisher, event, allocations)
+    _emit_low_stock_warnings(service, session, event, allocations)
 
 
 def handle_payment_failed(
@@ -189,7 +192,8 @@ def handle_payment_failed(
         )
         lines, units, replay = 0, 0, True
 
-    publisher.publish(
+    enqueue(
+        session,
         Topic.INVENTORY_RELEASED,
         event.child(
             event_type=EventType.INVENTORY_RELEASED,
@@ -228,7 +232,7 @@ def handle_order_shipped(
 
 def _emit_low_stock_warnings(
     service: InventoryService,
-    publisher: EventPublisher,
+    session: Session,
     event: EventEnvelope,
     allocations,
 ) -> None:
@@ -253,7 +257,8 @@ def _emit_low_stock_warnings(
         if not item.is_low:
             continue
 
-        publisher.publish(
+        enqueue(
+            session,
             Topic.INVENTORY_LOW,
             event.child(
                 event_type=EventType.INVENTORY_LOW,

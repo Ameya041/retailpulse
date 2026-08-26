@@ -1,4 +1,4 @@
-"""Saga tests for the inventory service.
+﻿"""Saga tests for the inventory service.
 
 Covers the second step of the order flow: consuming ``order.created``,
 reserving stock, and publishing the outcome -- plus the compensating release
@@ -22,6 +22,7 @@ from app.service import InventoryService
 from retailpulse_common.events.consumer import EventProcessor, PermanentEventError, RetryPolicy
 from retailpulse_common.events.envelope import EventEnvelope
 from retailpulse_common.events.idempotency import DuplicateEventError, IdempotencyGuard
+from retailpulse_common.events.outbox import OutboxRelay
 from retailpulse_common.events.producer import InMemoryEventPublisher
 from retailpulse_common.events.topics import DeadLetterTopic, EventType, Topic
 
@@ -29,6 +30,17 @@ from retailpulse_common.events.topics import DeadLetterTopic, EventType, Topic
 @pytest.fixture()
 def publisher() -> InMemoryEventPublisher:
     return InMemoryEventPublisher(source="test")
+
+
+def drain(database, publisher: InMemoryEventPublisher) -> InMemoryEventPublisher:
+    """Run the outbox relay, then assert on what actually reached Kafka.
+
+    Handlers stage events in the outbox rather than publishing inline, so these
+    tests exercise the real production path -- handler -> outbox -> relay ->
+    broker -- instead of stopping at the handler.
+    """
+    OutboxRelay(database, publisher).publish_pending()
+    return publisher
 
 
 def order_created(order_id, product_id, quantity, location_id=None) -> EventEnvelope:
@@ -79,7 +91,7 @@ def test_order_created_reserves_stock_and_publishes_reserved(database, publisher
         assert item.available_quantity == 7
         assert item.reserved_quantity == 3
 
-    reserved = publisher.only_event_on(Topic.INVENTORY_RESERVED)
+    reserved = drain(database, publisher).only_event_on(Topic.INVENTORY_RESERVED)
     assert reserved.payload["order_id"] == str(order_id)
     assert reserved.payload["allocations"][0]["quantity"] == 3
     # Same saga chain as the originating event.
@@ -99,7 +111,7 @@ def test_reserved_event_is_keyed_by_order_id(database, publisher):
             publisher=publisher,
         )
 
-    assert publisher.keys_on(Topic.INVENTORY_RESERVED) == [str(order_id)]
+    assert drain(database, publisher).keys_on(Topic.INVENTORY_RESERVED) == [str(order_id)]
 
 
 def test_insufficient_stock_publishes_inventory_failed_not_an_exception(database, publisher):
@@ -115,8 +127,8 @@ def test_insufficient_stock_publishes_inventory_failed_not_an_exception(database
             publisher=publisher,
         )
 
-    assert publisher.topics() == [Topic.INVENTORY_FAILED]
-    failed = publisher.only_event_on(Topic.INVENTORY_FAILED)
+    assert drain(database, publisher).topics() == [Topic.INVENTORY_FAILED]
+    failed = drain(database, publisher).only_event_on(Topic.INVENTORY_FAILED)
     assert failed.payload["reason"] == "insufficient_inventory"
     assert failed.payload["details"]["available"] == 2
 
@@ -136,7 +148,7 @@ def test_unknown_product_publishes_inventory_failed(database, publisher):
             publisher=publisher,
         )
 
-    assert publisher.topics() == [Topic.INVENTORY_FAILED]
+    assert drain(database, publisher).topics() == [Topic.INVENTORY_FAILED]
 
 
 def test_low_stock_event_is_emitted_when_threshold_is_crossed(database, publisher):
@@ -150,8 +162,8 @@ def test_low_stock_event_is_emitted_when_threshold_is_crossed(database, publishe
             publisher=publisher,
         )
 
-    assert Topic.INVENTORY_LOW in publisher.topics()
-    low = publisher.only_event_on(Topic.INVENTORY_LOW)
+    assert Topic.INVENTORY_LOW in drain(database, publisher).topics()
+    low = drain(database, publisher).only_event_on(Topic.INVENTORY_LOW)
     assert low.payload["available_quantity"] == 7
     assert low.payload["reorder_threshold"] == 8
 
@@ -167,7 +179,7 @@ def test_no_low_stock_event_when_above_threshold(database, publisher):
             publisher=publisher,
         )
 
-    assert Topic.INVENTORY_LOW not in publisher.topics()
+    assert Topic.INVENTORY_LOW not in drain(database, publisher).topics()
 
 
 # ---------------------------------------------------------------------------
@@ -208,8 +220,8 @@ def test_processor_commits_a_duplicate_rather_than_dead_lettering(database, publ
     assert processor.process(event, Topic.ORDER_CREATED, dispatch)
     assert processor.process(event, Topic.ORDER_CREATED, dispatch)
 
-    assert DeadLetterTopic.INVENTORY not in publisher.topics()
-    assert len(publisher.events_on(Topic.INVENTORY_RESERVED)) == 1
+    assert DeadLetterTopic.INVENTORY not in drain(database, publisher).topics()
+    assert len(drain(database, publisher).events_on(Topic.INVENTORY_RESERVED)) == 1
     with database.session() as session:
         assert InventoryService(session).get_item(product_id, location_id).reserved_quantity == 2
 
@@ -264,7 +276,7 @@ def test_payment_failure_releases_the_held_stock(database, publisher):
         assert item.available_quantity == 10  # fully restored
         assert item.reserved_quantity == 0
 
-    released = publisher.only_event_on(Topic.INVENTORY_RELEASED)
+    released = drain(database, publisher).only_event_on(Topic.INVENTORY_RELEASED)
     assert released.payload["released_units"] == 4
 
 
@@ -282,7 +294,7 @@ def test_payment_failure_for_an_order_that_never_reserved_is_a_no_op(database, p
             publisher=publisher,
         )
 
-    released = publisher.only_event_on(Topic.INVENTORY_RELEASED)
+    released = drain(database, publisher).only_event_on(Topic.INVENTORY_RELEASED)
     assert released.payload["released_units"] == 0
 
 
@@ -382,4 +394,4 @@ def test_malformed_event_reaches_the_inventory_dlq_without_retrying(database, pu
         dispatch,
     )
 
-    assert publisher.topics() == [DeadLetterTopic.ORDERS]
+    assert drain(database, publisher).topics() == [DeadLetterTopic.ORDERS]

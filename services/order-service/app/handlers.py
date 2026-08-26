@@ -28,6 +28,7 @@ from retailpulse_common.errors import ConflictError, NotFoundError
 from retailpulse_common.events.consumer import PermanentEventError
 from retailpulse_common.events.envelope import EventEnvelope
 from retailpulse_common.events.idempotency import IdempotencyGuard
+from retailpulse_common.events.outbox import enqueue
 from retailpulse_common.events.producer import EventPublisher, order_key
 from retailpulse_common.events.topics import EventType, Topic
 
@@ -110,7 +111,8 @@ def handle_inventory_reserved(
     if OrderStatus(order.status) is not OrderStatus.INVENTORY_RESERVED:
         return
 
-    publisher.publish(
+    enqueue(
+        session,
         Topic.PAYMENT_REQUESTED,
         event.child(
             event_type=EventType.PAYMENT_REQUESTED,
@@ -133,7 +135,8 @@ def handle_inventory_failed(
     reason = str(event.payload.get("reason", "INSUFFICIENT_INVENTORY"))[:120]
     _apply(event, topic, session, OrderStatus.CANCELLED, reason=reason)
 
-    publisher.publish(
+    enqueue(
+        session,
         Topic.ORDER_CANCELLED,
         event.child(
             event_type=EventType.ORDER_CANCELLED,
@@ -158,7 +161,8 @@ def handle_payment_confirmed(
 
     service.transition(order_id, OrderStatus.CONFIRMED, actor=SERVICE)
 
-    publisher.publish(
+    enqueue(
+        session,
         Topic.ORDER_CONFIRMED,
         event.child(
             event_type=EventType.ORDER_CONFIRMED,
@@ -198,7 +202,8 @@ def handle_inventory_released(
     service.transition(
         order_id, OrderStatus.CANCELLED, actor=SERVICE, reason="PAYMENT_FAILED"
     )
-    publisher.publish(
+    enqueue(
+        session,
         Topic.ORDER_CANCELLED,
         event.child(
             event_type=EventType.ORDER_CANCELLED,

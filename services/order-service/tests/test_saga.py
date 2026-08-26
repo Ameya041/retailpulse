@@ -1,4 +1,4 @@
-"""Saga tests for the order service.
+﻿"""Saga tests for the order service.
 
 The full distributed flow is exercised without a broker by handing events
 directly to the handlers. That keeps these fast enough to run on every push,
@@ -33,6 +33,17 @@ from tests.conftest import SHIPPING_ADDRESS, WIDGET_ID
 @pytest.fixture()
 def publisher() -> InMemoryEventPublisher:
     return InMemoryEventPublisher(source="test")
+
+
+def drain(database, publisher: InMemoryEventPublisher) -> InMemoryEventPublisher:
+    """Run the outbox relay, then assert on what actually reached Kafka.
+
+    Handlers stage events in the outbox rather than publishing inline, so these
+    tests exercise the real production path -- handler -> outbox -> relay ->
+    broker -- instead of stopping at the handler.
+    """
+    OutboxRelay(database, publisher).publish_pending()
+    return publisher
 
 
 def _event(event_type: str, source: str, **payload) -> EventEnvelope:
@@ -111,7 +122,7 @@ def test_relay_publishes_and_marks_the_row(client, customer_headers, database, p
     published = OutboxRelay(database, publisher).publish_pending()
 
     assert published == 1
-    assert publisher.topics() == [Topic.ORDER_CREATED]
+    assert drain(database, publisher).topics() == [Topic.ORDER_CREATED]
     with database.session() as session:
         assert session.query(OutboxEvent).one().published_at is not None
 
@@ -251,8 +262,12 @@ def test_inventory_reserved_advances_the_order_and_requests_payment(
 
     body = client.get(f"/orders/{order_id}", headers=customer_headers).json()
     assert body["status"] == "INVENTORY_RESERVED"
-    assert publisher.topics() == [Topic.PAYMENT_REQUESTED]
-    payment = publisher.only_event_on(Topic.PAYMENT_REQUESTED)
+    # The drain also flushes the ORDER_CREATED staged when the order was placed.
+    assert drain(database, publisher).topics() == [
+        Topic.ORDER_CREATED,
+        Topic.PAYMENT_REQUESTED,
+    ]
+    payment = drain(database, publisher).only_event_on(Topic.PAYMENT_REQUESTED)
     assert payment.payload["amount"] == placed_order["total_amount"]
     # Same saga, so the correlation id is carried through.
     assert payment.correlation_id == event.correlation_id
@@ -277,7 +292,7 @@ def test_inventory_failed_cancels_the_order(
     body = client.get(f"/orders/{order_id}", headers=customer_headers).json()
     assert body["status"] == "CANCELLED"
     assert body["cancellation_reason"] == "insufficient_inventory"
-    assert Topic.ORDER_CANCELLED in publisher.topics()
+    assert Topic.ORDER_CANCELLED in drain(database, publisher).topics()
 
 
 def test_payment_confirmed_moves_through_to_confirmed(
@@ -303,7 +318,7 @@ def test_payment_confirmed_moves_through_to_confirmed(
     body = client.get(f"/orders/{order_id}", headers=customer_headers).json()
     # PAYMENT_CONFIRMED and then straight on to CONFIRMED.
     assert body["status"] == "CONFIRMED"
-    assert Topic.ORDER_CONFIRMED in publisher.topics()
+    assert Topic.ORDER_CONFIRMED in drain(database, publisher).topics()
 
 
 def test_full_payment_failure_compensation_saga(
@@ -361,7 +376,7 @@ def test_redelivered_event_is_rejected_by_the_idempotency_guard(
         )
 
     # Exactly one payment request, not two.
-    assert publisher.topics().count(Topic.PAYMENT_REQUESTED) == 1
+    assert drain(database, publisher).topics().count(Topic.PAYMENT_REQUESTED) == 1
 
 
 def test_processor_treats_a_redelivered_event_as_success(
@@ -387,8 +402,8 @@ def test_processor_treats_a_redelivered_event_as_success(
     assert processor.process(event, Topic.INVENTORY_RESERVED, dispatch)
 
     # Committed both times, dead-lettered neither, acted once.
-    assert publisher.topics().count(Topic.PAYMENT_REQUESTED) == 1
-    assert DeadLetterTopic.ORDERS not in publisher.topics()
+    assert drain(database, publisher).topics().count(Topic.PAYMENT_REQUESTED) == 1
+    assert DeadLetterTopic.ORDERS not in drain(database, publisher).topics()
 
 
 def test_processed_events_records_the_consumer_group(database, publisher, placed_order):
@@ -458,7 +473,7 @@ def test_malformed_event_is_dead_lettered_without_retrying(database, publisher):
         dispatch,
     )
     # Routed by the topic it arrived on, not by which service consumed it.
-    assert DeadLetterTopic.INVENTORY in publisher.topics()
+    assert DeadLetterTopic.INVENTORY in drain(database, publisher).topics()
 
 
 def test_out_of_order_event_is_ignored_not_dead_lettered(
@@ -482,4 +497,4 @@ def test_out_of_order_event_is_ignored_not_dead_lettered(
 
     body = client.get(f"/orders/{order_id}", headers=customer_headers).json()
     assert body["status"] == "CREATED"  # unchanged
-    assert DeadLetterTopic.ORDERS not in publisher.topics()
+    assert DeadLetterTopic.ORDERS not in drain(database, publisher).topics()
