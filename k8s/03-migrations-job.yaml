@@ -1,0 +1,93 @@
+# Schema migrations as a Job, not as application startup.
+#
+# Running migrations when a service boots means every replica races to apply
+# the same DDL. A Job runs once, and everything else waits for it.
+#
+# `initContainers` on the app Deployments could achieve the same, but they run
+# per pod -- so a 3-replica Deployment would still run the migration three
+# times. A Job is the construct that actually means "exactly once".
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: retailpulse-migrate
+  namespace: retailpulse
+spec:
+  # Bounded retries. Without this a migration that can never succeed (a bad
+  # revision, say) retries forever and buries the real error in noise.
+  backoffLimit: 3
+  # Clean the Job up automatically an hour after it finishes, so the namespace
+  # does not accumulate one completed Job per deploy.
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: retailpulse-migrate
+    spec:
+      restartPolicy: Never
+      # The Job must not start before Postgres is accepting connections.
+      # Kubernetes has no `depends_on`, so this is expressed as an init
+      # container that blocks until the port answers.
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h postgres -p 5432 -U "$POSTGRES_USER"; do
+                echo "waiting for postgres..."
+                sleep 2
+              done
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: retailpulse-secrets, key: POSTGRES_USER }
+      containers:
+        - name: migrate
+          image: retailpulse/migrate:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: { name: retailpulse-config }
+            - secretRef: { name: retailpulse-secrets }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+---
+# Creating Kafka topics is the same shape of problem: it must happen once,
+# before the consumers start, and auto-creation is disabled on purpose.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: retailpulse-kafka-topics
+  namespace: retailpulse
+spec:
+  backoffLimit: 5
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: retailpulse-kafka-topics
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: create-topics
+          image: retailpulse/order-service:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - /app/scripts/create_topics.py
+            - --bootstrap-servers
+            - kafka:9092
+          envFrom:
+            - configMapRef: { name: retailpulse-config }
+            - secretRef: { name: retailpulse-secrets }
+          volumeMounts:
+            - name: scripts
+              mountPath: /app/scripts
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+      volumes:
+        - name: scripts
+          configMap:
+            name: retailpulse-scripts

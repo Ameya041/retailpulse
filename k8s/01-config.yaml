@@ -1,0 +1,52 @@
+# Configuration and secrets.
+#
+# The split matters: a ConfigMap is plain text and safe to read, a Secret is
+# the thing that must never appear in a commit. Keeping service URLs in the
+# ConfigMap and credentials in the Secret means the interesting configuration
+# stays reviewable while the sensitive part does not leak.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: retailpulse-config
+  namespace: retailpulse
+data:
+  ENVIRONMENT: "kubernetes"
+  LOG_LEVEL: "INFO"
+
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  REDIS_URL: "redis://redis:6379/0"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+
+  PRODUCT_SERVICE_URL: "http://product-service:8001"
+  INVENTORY_SERVICE_URL: "http://inventory-service:8002"
+  ORDER_SERVICE_URL: "http://order-service:8003"
+  USER_SERVICE_URL: "http://user-service:8004"
+  PAYMENT_SERVICE_URL: "http://payment-service:8005"
+  FULFILMENT_SERVICE_URL: "http://fulfilment-service:8006"
+  ANALYTICS_SERVICE_URL: "http://analytics-service:8007"
+  ML_SERVICE_URL: "http://ml-service:8008"
+
+  PAYMENT_SUCCESS_RATE: "0.95"
+  RATE_LIMIT_REQUESTS_PER_MINUTE: "100"
+  CACHE_TTL_SECONDS: "300"
+---
+# NOTE: this manifest exists so the deployment is reproducible, and the values
+# are obvious placeholders. Committing real credentials to git is the mistake
+# this comment exists to prevent -- a secret in history stays in history even
+# after it is "removed".
+#
+# In a real cluster these come from Sealed Secrets, External Secrets backed by
+# a vault, or the cloud provider's secret manager. Generate a real JWT key
+# with:
+#     python -c "import secrets; print(secrets.token_urlsafe(48))"
+apiVersion: v1
+kind: Secret
+metadata:
+  name: retailpulse-secrets
+  namespace: retailpulse
+type: Opaque
+stringData:
+  POSTGRES_USER: "retailpulse"
+  POSTGRES_PASSWORD: "CHANGE-ME-BEFORE-DEPLOYING"
+  JWT_SECRET_KEY: "CHANGE-ME-BEFORE-DEPLOYING-at-least-32-bytes"

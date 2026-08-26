@@ -1,0 +1,149 @@
+# Ingress and network policy.
+#
+# Only two things are reachable from outside the cluster: the frontend, and
+# the gateway under /api. Every other service is ClusterIP-only and can be
+# reached solely from inside the namespace -- which is what makes each
+# service's own authorization the boundary that matters, rather than hoping
+# nothing else is exposed.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: retailpulse
+  labels:
+    app: frontend
+spec:
+  type: ClusterIP
+  selector:
+    app: frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: retailpulse
+  labels:
+    app: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: retailpulse/frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: retailpulse
+  namespace: retailpulse
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "8m"
+    # The gateway applies its own per-user rate limiting; this is a coarser
+    # per-IP limit at the edge, which stops a flood before it reaches any
+    # application pod at all.
+    nginx.ingress.kubernetes.io/limit-rps: "50"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: retailpulse.local
+      http:
+        paths:
+          # More specific path first: /api must not be swallowed by /.
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
+---
+# Default deny for ingress inside the namespace.
+#
+# Without this, any compromised pod anywhere in the cluster can talk directly
+# to the order service and bypass the gateway entirely. Defence in depth: the
+# services authorize every request regardless, but there is no reason for them
+# to be reachable in the first place.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: retailpulse
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# Allow traffic only from inside the namespace, plus from the ingress
+# controller to the two public-facing workloads.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-internal
+  namespace: retailpulse
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: retailpulse
+    # Prometheus scrapes /metrics from every pod, so it needs an explicit hole.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-controller
+  namespace: retailpulse
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["frontend", "api-gateway"]
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx

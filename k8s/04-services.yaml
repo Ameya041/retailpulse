@@ -1,0 +1,1317 @@
+﻿# GENERATED FILE -- do not edit.
+# Regenerate with: .\scripts\generate-k8s.ps1
+# Source template: k8s/templates/service.yaml.template
+# Template for one HTTP service. Placeholders: api-gateway, 8000, 2.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: retailpulse
+  labels:
+    app: api-gateway
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  type: ClusterIP
+  selector:
+    app: api-gateway
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: retailpulse
+  labels:
+    app: api-gateway
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api-gateway
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never drop below the current replica count during a deploy, and add at
+      # most one extra pod. With maxUnavailable > 0 a rolling update reduces
+      # capacity at exactly the moment traffic is being reshuffled.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+        app.kubernetes.io/part-of: retailpulse
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Give in-flight requests time to finish. The default 30s is usually
+      # fine; what matters is that it exceeds the longest normal request.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        # The image already creates a non-root user; this makes the cluster
+        # refuse to run it if that ever regresses, rather than silently
+        # running as root.
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      affinity:
+        podAntiAffinity:
+          # Prefer, not require: on a single-node cluster (minikube) a hard
+          # requirement would leave the second replica permanently Pending.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: api-gateway
+      containers:
+        - name: api-gateway
+          image: retailpulse/api-gateway:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef: { name: retailpulse-config }
+            - secretRef: { name: retailpulse-secrets }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # readOnlyRootFilesystem means /tmp has to be provided explicitly.
+            - name: tmp
+              mountPath: /tmp
+          # Liveness answers "is this process alive?" and must not check
+          # dependencies. If it did, a Redis blip would restart every pod --
+          # turning a degraded dependency into a full outage.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness answers "can this pod serve traffic right now?" and does
+          # check dependencies. Failing it removes the pod from the Service
+          # without restarting it, so it can recover on its own.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Startup probe covers slow first boots. Without it, a service that
+          # takes 40s to start would be killed by the liveness probe before it
+          # ever became healthy -- a crash loop that looks like a broken app.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Keeps at least one replica available during voluntary disruption -- a node
+# drain, a cluster upgrade. Without a PDB, `kubectl drain` will happily evict
+# every replica of a service at once.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-gateway
+  namespace: retailpulse
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: api-gateway
+
+# Template for one HTTP service. Placeholders: product-service, 8001, 2.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: product-service
+  namespace: retailpulse
+  labels:
+    app: product-service
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  type: ClusterIP
+  selector:
+    app: product-service
+  ports:
+    - name: http
+      port: 8001
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-service
+  namespace: retailpulse
+  labels:
+    app: product-service
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: product-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never drop below the current replica count during a deploy, and add at
+      # most one extra pod. With maxUnavailable > 0 a rolling update reduces
+      # capacity at exactly the moment traffic is being reshuffled.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: product-service
+        app.kubernetes.io/part-of: retailpulse
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8001"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Give in-flight requests time to finish. The default 30s is usually
+      # fine; what matters is that it exceeds the longest normal request.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        # The image already creates a non-root user; this makes the cluster
+        # refuse to run it if that ever regresses, rather than silently
+        # running as root.
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      affinity:
+        podAntiAffinity:
+          # Prefer, not require: on a single-node cluster (minikube) a hard
+          # requirement would leave the second replica permanently Pending.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: product-service
+      containers:
+        - name: product-service
+          image: retailpulse/product-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8001
+          envFrom:
+            - configMapRef: { name: retailpulse-config }
+            - secretRef: { name: retailpulse-secrets }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # readOnlyRootFilesystem means /tmp has to be provided explicitly.
+            - name: tmp
+              mountPath: /tmp
+          # Liveness answers "is this process alive?" and must not check
+          # dependencies. If it did, a Redis blip would restart every pod --
+          # turning a degraded dependency into a full outage.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness answers "can this pod serve traffic right now?" and does
+          # check dependencies. Failing it removes the pod from the Service
+          # without restarting it, so it can recover on its own.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Startup probe covers slow first boots. Without it, a service that
+          # takes 40s to start would be killed by the liveness probe before it
+          # ever became healthy -- a crash loop that looks like a broken app.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Keeps at least one replica available during voluntary disruption -- a node
+# drain, a cluster upgrade. Without a PDB, `kubectl drain` will happily evict
+# every replica of a service at once.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: product-service
+  namespace: retailpulse
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: product-service
+
+# Template for one HTTP service. Placeholders: inventory-service, 8002, 2.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-service
+  namespace: retailpulse
+  labels:
+    app: inventory-service
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  type: ClusterIP
+  selector:
+    app: inventory-service
+  ports:
+    - name: http
+      port: 8002
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-service
+  namespace: retailpulse
+  labels:
+    app: inventory-service
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: inventory-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never drop below the current replica count during a deploy, and add at
+      # most one extra pod. With maxUnavailable > 0 a rolling update reduces
+      # capacity at exactly the moment traffic is being reshuffled.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: inventory-service
+        app.kubernetes.io/part-of: retailpulse
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8002"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Give in-flight requests time to finish. The default 30s is usually
+      # fine; what matters is that it exceeds the longest normal request.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        # The image already creates a non-root user; this makes the cluster
+        # refuse to run it if that ever regresses, rather than silently
+        # running as root.
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      affinity:
+        podAntiAffinity:
+          # Prefer, not require: on a single-node cluster (minikube) a hard
+          # requirement would leave the second replica permanently Pending.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: inventory-service
+      containers:
+        - name: inventory-service
+          image: retailpulse/inventory-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8002
+          envFrom:
+            - configMapRef: { name: retailpulse-config }
+            - secretRef: { name: retailpulse-secrets }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # readOnlyRootFilesystem means /tmp has to be provided explicitly.
+            - name: tmp
+              mountPath: /tmp
+          # Liveness answers "is this process alive?" and must not check
+          # dependencies. If it did, a Redis blip would restart every pod --
+          # turning a degraded dependency into a full outage.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness answers "can this pod serve traffic right now?" and does
+          # check dependencies. Failing it removes the pod from the Service
+          # without restarting it, so it can recover on its own.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Startup probe covers slow first boots. Without it, a service that
+          # takes 40s to start would be killed by the liveness probe before it
+          # ever became healthy -- a crash loop that looks like a broken app.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests:
+              cpu: 150m
+              memory: 256Mi
+            limits:
+              cpu: 600m
+              memory: 512Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Keeps at least one replica available during voluntary disruption -- a node
+# drain, a cluster upgrade. Without a PDB, `kubectl drain` will happily evict
+# every replica of a service at once.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: inventory-service
+  namespace: retailpulse
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: inventory-service
+
+# Template for one HTTP service. Placeholders: order-service, 8003, 2.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service
+  namespace: retailpulse
+  labels:
+    app: order-service
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  type: ClusterIP
+  selector:
+    app: order-service
+  ports:
+    - name: http
+      port: 8003
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  namespace: retailpulse
+  labels:
+    app: order-service
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: order-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never drop below the current replica count during a deploy, and add at
+      # most one extra pod. With maxUnavailable > 0 a rolling update reduces
+      # capacity at exactly the moment traffic is being reshuffled.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: order-service
+        app.kubernetes.io/part-of: retailpulse
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8003"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Give in-flight requests time to finish. The default 30s is usually
+      # fine; what matters is that it exceeds the longest normal request.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        # The image already creates a non-root user; this makes the cluster
+        # refuse to run it if that ever regresses, rather than silently
+        # running as root.
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      affinity:
+        podAntiAffinity:
+          # Prefer, not require: on a single-node cluster (minikube) a hard
+          # requirement would leave the second replica permanently Pending.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: order-service
+      containers:
+        - name: order-service
+          image: retailpulse/order-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8003
+          envFrom:
+            - configMapRef: { name: retailpulse-config }
+            - secretRef: { name: retailpulse-secrets }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # readOnlyRootFilesystem means /tmp has to be provided explicitly.
+            - name: tmp
+              mountPath: /tmp
+          # Liveness answers "is this process alive?" and must not check
+          # dependencies. If it did, a Redis blip would restart every pod --
+          # turning a degraded dependency into a full outage.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness answers "can this pod serve traffic right now?" and does
+          # check dependencies. Failing it removes the pod from the Service
+          # without restarting it, so it can recover on its own.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Startup probe covers slow first boots. Without it, a service that
+          # takes 40s to start would be killed by the liveness probe before it
+          # ever became healthy -- a crash loop that looks like a broken app.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests:
+              cpu: 150m
+              memory: 256Mi
+            limits:
+              cpu: 600m
+              memory: 512Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Keeps at least one replica available during voluntary disruption -- a node
+# drain, a cluster upgrade. Without a PDB, `kubectl drain` will happily evict
+# every replica of a service at once.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: order-service
+  namespace: retailpulse
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: order-service
+
+# Template for one HTTP service. Placeholders: user-service, 8004, 2.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-service
+  namespace: retailpulse
+  labels:
+    app: user-service
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  type: ClusterIP
+  selector:
+    app: user-service
+  ports:
+    - name: http
+      port: 8004
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+  namespace: retailpulse
+  labels:
+    app: user-service
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: user-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never drop below the current replica count during a deploy, and add at
+      # most one extra pod. With maxUnavailable > 0 a rolling update reduces
+      # capacity at exactly the moment traffic is being reshuffled.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: user-service
+        app.kubernetes.io/part-of: retailpulse
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8004"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Give in-flight requests time to finish. The default 30s is usually
+      # fine; what matters is that it exceeds the longest normal request.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        # The image already creates a non-root user; this makes the cluster
+        # refuse to run it if that ever regresses, rather than silently
+        # running as root.
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      affinity:
+        podAntiAffinity:
+          # Prefer, not require: on a single-node cluster (minikube) a hard
+          # requirement would leave the second replica permanently Pending.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: user-service
+      containers:
+        - name: user-service
+          image: retailpulse/user-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8004
+          envFrom:
+            - configMapRef: { name: retailpulse-config }
+            - secretRef: { name: retailpulse-secrets }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # readOnlyRootFilesystem means /tmp has to be provided explicitly.
+            - name: tmp
+              mountPath: /tmp
+          # Liveness answers "is this process alive?" and must not check
+          # dependencies. If it did, a Redis blip would restart every pod --
+          # turning a degraded dependency into a full outage.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness answers "can this pod serve traffic right now?" and does
+          # check dependencies. Failing it removes the pod from the Service
+          # without restarting it, so it can recover on its own.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Startup probe covers slow first boots. Without it, a service that
+          # takes 40s to start would be killed by the liveness probe before it
+          # ever became healthy -- a crash loop that looks like a broken app.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Keeps at least one replica available during voluntary disruption -- a node
+# drain, a cluster upgrade. Without a PDB, `kubectl drain` will happily evict
+# every replica of a service at once.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: user-service
+  namespace: retailpulse
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: user-service
+
+# Template for one HTTP service. Placeholders: payment-service, 8005, 2.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+  namespace: retailpulse
+  labels:
+    app: payment-service
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  type: ClusterIP
+  selector:
+    app: payment-service
+  ports:
+    - name: http
+      port: 8005
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  namespace: retailpulse
+  labels:
+    app: payment-service
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: payment-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never drop below the current replica count during a deploy, and add at
+      # most one extra pod. With maxUnavailable > 0 a rolling update reduces
+      # capacity at exactly the moment traffic is being reshuffled.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: payment-service
+        app.kubernetes.io/part-of: retailpulse
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8005"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Give in-flight requests time to finish. The default 30s is usually
+      # fine; what matters is that it exceeds the longest normal request.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        # The image already creates a non-root user; this makes the cluster
+        # refuse to run it if that ever regresses, rather than silently
+        # running as root.
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      affinity:
+        podAntiAffinity:
+          # Prefer, not require: on a single-node cluster (minikube) a hard
+          # requirement would leave the second replica permanently Pending.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: payment-service
+      containers:
+        - name: payment-service
+          image: retailpulse/payment-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8005
+          envFrom:
+            - configMapRef: { name: retailpulse-config }
+            - secretRef: { name: retailpulse-secrets }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # readOnlyRootFilesystem means /tmp has to be provided explicitly.
+            - name: tmp
+              mountPath: /tmp
+          # Liveness answers "is this process alive?" and must not check
+          # dependencies. If it did, a Redis blip would restart every pod --
+          # turning a degraded dependency into a full outage.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness answers "can this pod serve traffic right now?" and does
+          # check dependencies. Failing it removes the pod from the Service
+          # without restarting it, so it can recover on its own.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Startup probe covers slow first boots. Without it, a service that
+          # takes 40s to start would be killed by the liveness probe before it
+          # ever became healthy -- a crash loop that looks like a broken app.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Keeps at least one replica available during voluntary disruption -- a node
+# drain, a cluster upgrade. Without a PDB, `kubectl drain` will happily evict
+# every replica of a service at once.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payment-service
+  namespace: retailpulse
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: payment-service
+
+# Template for one HTTP service. Placeholders: fulfilment-service, 8006, 2.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fulfilment-service
+  namespace: retailpulse
+  labels:
+    app: fulfilment-service
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  type: ClusterIP
+  selector:
+    app: fulfilment-service
+  ports:
+    - name: http
+      port: 8006
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fulfilment-service
+  namespace: retailpulse
+  labels:
+    app: fulfilment-service
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: fulfilment-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never drop below the current replica count during a deploy, and add at
+      # most one extra pod. With maxUnavailable > 0 a rolling update reduces
+      # capacity at exactly the moment traffic is being reshuffled.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: fulfilment-service
+        app.kubernetes.io/part-of: retailpulse
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8006"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Give in-flight requests time to finish. The default 30s is usually
+      # fine; what matters is that it exceeds the longest normal request.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        # The image already creates a non-root user; this makes the cluster
+        # refuse to run it if that ever regresses, rather than silently
+        # running as root.
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      affinity:
+        podAntiAffinity:
+          # Prefer, not require: on a single-node cluster (minikube) a hard
+          # requirement would leave the second replica permanently Pending.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: fulfilment-service
+      containers:
+        - name: fulfilment-service
+          image: retailpulse/fulfilment-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8006
+          envFrom:
+            - configMapRef: { name: retailpulse-config }
+            - secretRef: { name: retailpulse-secrets }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # readOnlyRootFilesystem means /tmp has to be provided explicitly.
+            - name: tmp
+              mountPath: /tmp
+          # Liveness answers "is this process alive?" and must not check
+          # dependencies. If it did, a Redis blip would restart every pod --
+          # turning a degraded dependency into a full outage.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness answers "can this pod serve traffic right now?" and does
+          # check dependencies. Failing it removes the pod from the Service
+          # without restarting it, so it can recover on its own.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Startup probe covers slow first boots. Without it, a service that
+          # takes 40s to start would be killed by the liveness probe before it
+          # ever became healthy -- a crash loop that looks like a broken app.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Keeps at least one replica available during voluntary disruption -- a node
+# drain, a cluster upgrade. Without a PDB, `kubectl drain` will happily evict
+# every replica of a service at once.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: fulfilment-service
+  namespace: retailpulse
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: fulfilment-service
+
+# Template for one HTTP service. Placeholders: analytics-service, 8007, 2.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics-service
+  namespace: retailpulse
+  labels:
+    app: analytics-service
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  type: ClusterIP
+  selector:
+    app: analytics-service
+  ports:
+    - name: http
+      port: 8007
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-service
+  namespace: retailpulse
+  labels:
+    app: analytics-service
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: analytics-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never drop below the current replica count during a deploy, and add at
+      # most one extra pod. With maxUnavailable > 0 a rolling update reduces
+      # capacity at exactly the moment traffic is being reshuffled.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: analytics-service
+        app.kubernetes.io/part-of: retailpulse
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8007"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Give in-flight requests time to finish. The default 30s is usually
+      # fine; what matters is that it exceeds the longest normal request.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        # The image already creates a non-root user; this makes the cluster
+        # refuse to run it if that ever regresses, rather than silently
+        # running as root.
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      affinity:
+        podAntiAffinity:
+          # Prefer, not require: on a single-node cluster (minikube) a hard
+          # requirement would leave the second replica permanently Pending.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: analytics-service
+      containers:
+        - name: analytics-service
+          image: retailpulse/analytics-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8007
+          envFrom:
+            - configMapRef: { name: retailpulse-config }
+            - secretRef: { name: retailpulse-secrets }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # readOnlyRootFilesystem means /tmp has to be provided explicitly.
+            - name: tmp
+              mountPath: /tmp
+          # Liveness answers "is this process alive?" and must not check
+          # dependencies. If it did, a Redis blip would restart every pod --
+          # turning a degraded dependency into a full outage.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness answers "can this pod serve traffic right now?" and does
+          # check dependencies. Failing it removes the pod from the Service
+          # without restarting it, so it can recover on its own.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Startup probe covers slow first boots. Without it, a service that
+          # takes 40s to start would be killed by the liveness probe before it
+          # ever became healthy -- a crash loop that looks like a broken app.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests:
+              cpu: 150m
+              memory: 384Mi
+            limits:
+              cpu: 700m
+              memory: 768Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Keeps at least one replica available during voluntary disruption -- a node
+# drain, a cluster upgrade. Without a PDB, `kubectl drain` will happily evict
+# every replica of a service at once.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: analytics-service
+  namespace: retailpulse
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: analytics-service
+
+# Template for one HTTP service. Placeholders: ml-service, 8008, 1.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-service
+  namespace: retailpulse
+  labels:
+    app: ml-service
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  type: ClusterIP
+  selector:
+    app: ml-service
+  ports:
+    - name: http
+      port: 8008
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-service
+  namespace: retailpulse
+  labels:
+    app: ml-service
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ml-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never drop below the current replica count during a deploy, and add at
+      # most one extra pod. With maxUnavailable > 0 a rolling update reduces
+      # capacity at exactly the moment traffic is being reshuffled.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: ml-service
+        app.kubernetes.io/part-of: retailpulse
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8008"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Give in-flight requests time to finish. The default 30s is usually
+      # fine; what matters is that it exceeds the longest normal request.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        # The image already creates a non-root user; this makes the cluster
+        # refuse to run it if that ever regresses, rather than silently
+        # running as root.
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      affinity:
+        podAntiAffinity:
+          # Prefer, not require: on a single-node cluster (minikube) a hard
+          # requirement would leave the second replica permanently Pending.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: ml-service
+      containers:
+        - name: ml-service
+          image: retailpulse/ml-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8008
+          envFrom:
+            - configMapRef: { name: retailpulse-config }
+            - secretRef: { name: retailpulse-secrets }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # readOnlyRootFilesystem means /tmp has to be provided explicitly.
+            - name: tmp
+              mountPath: /tmp
+          # Liveness answers "is this process alive?" and must not check
+          # dependencies. If it did, a Redis blip would restart every pod --
+          # turning a degraded dependency into a full outage.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness answers "can this pod serve traffic right now?" and does
+          # check dependencies. Failing it removes the pod from the Service
+          # without restarting it, so it can recover on its own.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Startup probe covers slow first boots. Without it, a service that
+          # takes 40s to start would be killed by the liveness probe before it
+          # ever became healthy -- a crash loop that looks like a broken app.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1
+              memory: 1Gi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Keeps at least one replica available during voluntary disruption -- a node
+# drain, a cluster upgrade. Without a PDB, `kubectl drain` will happily evict
+# every replica of a service at once.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ml-service
+  namespace: retailpulse
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: ml-service
+

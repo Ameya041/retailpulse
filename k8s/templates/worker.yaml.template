@@ -1,0 +1,69 @@
+# Template for one Kafka consumer worker. Placeholders: __NAME__, __SERVICE__.
+#
+# Deliberately a separate Deployment from the service that shares its image.
+# The API scales on request latency; a consumer scales on partition count and
+# consumer lag. Sharing a Deployment would mean scaling the web tier to clear
+# a backlog, and every API replica joining the consumer group.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: __NAME__
+  namespace: retailpulse
+  labels:
+    app: __NAME__
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/part-of: retailpulse
+spec:
+  # One replica. Kafka assigns each partition to exactly one consumer in a
+  # group, so replicas beyond the partition count sit idle -- scaling a
+  # consumer past its partitions buys nothing.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: __NAME__
+  strategy:
+    # Recreate, not RollingUpdate. A rolling update briefly runs old and new
+    # pods together, which triggers a consumer group rebalance and pauses
+    # processing anyway. Stopping first makes the handover explicit and short.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: __NAME__
+        app.kubernetes.io/component: worker
+        app.kubernetes.io/part-of: retailpulse
+    spec:
+      # Long enough for the consumer to finish the message it is holding and
+      # commit its offset. Cutting it short means that message is redelivered
+      # on restart -- safe, because consumers are idempotent, but wasteful.
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: __NAME__
+          image: retailpulse/__SERVICE__:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "app.worker"]
+          envFrom:
+            - configMapRef: { name: retailpulse-config }
+            - secretRef: { name: retailpulse-secrets }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          # No HTTP probes: a consumer serves no HTTP. A liveness probe here
+          # would need a side-channel, and the signal that actually matters --
+          # consumer lag -- is already in Prometheus.
+          resources:
+            requests: { cpu: 100m, memory: 192Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+      volumes:
+        - name: tmp
+          emptyDir: {}

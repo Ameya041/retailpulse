@@ -1,0 +1,45 @@
+# Namespace and resource quota.
+#
+# A namespace is not just tidiness: it is the boundary for quotas, network
+# policy and RBAC. Deploying into `default` means none of those can be scoped
+# to this application.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: retailpulse
+  labels:
+    app.kubernetes.io/part-of: retailpulse
+---
+# A quota stops one misconfigured Deployment from consuming the whole cluster.
+# Without it, a bad `replicas: 500` or a memory leak in one service starves
+# every other workload on the node.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: retailpulse-quota
+  namespace: retailpulse
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    pods: "60"
+---
+# Every container must declare requests and limits. Without a default, a pod
+# that omits them is scheduled as "best effort" and is the first thing the
+# kubelet evicts under memory pressure -- usually at the worst moment.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: retailpulse-defaults
+  namespace: retailpulse
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 500m
+        memory: 512Mi
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
